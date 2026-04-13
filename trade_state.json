@@ -1,0 +1,23 @@
+{
+    "active": true,
+    "index_symbol": "SENSEX",
+    "legs": {
+        "sell_ce": "BSE_FO|875387",
+        "sell_pe": "BSE_FO|869363",
+        "buy_ce": "BSE_FO|871298",
+        "buy_pe": "BSE_FO|873428"
+    },
+    "entry_prices": {
+        "sell_ce": 748.75,
+        "sell_pe": 725.6,
+        "buy_ce": 36.5,
+        "buy_pe": 37.2
+    },
+    "quantity": 20,
+    "strikes": {
+        "sell_ce": 76800,
+        "sell_pe": 76800,
+        "buy_ce": 79700.0,
+        "buy_pe": 73000.0
+    }
+}

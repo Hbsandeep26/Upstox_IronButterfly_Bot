@@ -1,22 +1,7 @@
 # main.py
 import os
 import logging
-
-# 1. ANCHOR THE LOG FILE TO YOUR PROJECT FOLDER
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-log_file_path = os.path.join(BASE_DIR, "bot.log")
-
-# 2. FORCE PYTHON TO USE OUR LOGGING RULES
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path, mode='a', encoding='utf-8'),
-        logging.StreamHandler()
-    ],
-    force=True  # <-- THE MAGIC FIX: This overrides any hidden library loggers
-)
-
+import json
 import schedule
 import time
 from datetime import datetime
@@ -28,12 +13,24 @@ from data_feed import get_spot_price, get_option_chain, monitor_live_prices
 from strategy import calculate_iron_butterfly_legs, risk_management_evaluator
 from execution import place_iron_butterfly_basket, square_off_all
 
+# ANCHOR THE LOG FILE & PATHS
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+log_file_path = os.path.join(BASE_DIR, "bot.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file_path, mode='a', encoding='utf-8'),
+        logging.StreamHandler()
+    ],
+    force=True 
+)
 
 def continuous_trading_session(index_symbol, expiry_date, cutoff_hour, cutoff_minute):
     logging.info(f"--- STARTING CONTINUOUS SESSION FOR {index_symbol} ---")
 
     # --- 1. BTST WAKE-UP PROTOCOL ---
-    # If a trade was carried forward from yesterday, wake it up and resume monitoring!
     state = state_manager.load_state()
     if state and state.get("active"):
         logging.critical(f"🌙 BTST CARRY FORWARD DETECTED: Waking up existing {index_symbol} trade.")
@@ -42,50 +39,46 @@ def continuous_trading_session(index_symbol, expiry_date, cutoff_hour, cutoff_mi
         if stop_loss_hit:
             logging.warning("Stop Loss hit on Carry Forward trade! Squaring off...")
             square_off_all(exit_prices)
-            logging.info("Cooling down for 60 seconds...")
             time.sleep(60)
-        return # Once the carried-forward trade is done, exit this session.
+        return
 
     # --- 2. NORMAL INTRADAY DEPLOYMENT ---
     while True:
         now = datetime.now()
+        
+        # THE GRACEFUL HANDOFF: Soft Cutoff.
+        # It checks the clock BEFORE taking a new trade. Active trades are untouched.
         if now.hour > cutoff_hour or (now.hour == cutoff_hour and now.minute >= cutoff_minute):
-            logging.info(f"Cutoff time {cutoff_hour}:{cutoff_minute} reached. Stopping continuous loop.")
-            break
+            logging.info(f"⏰ Soft Cutoff ({cutoff_hour}:{cutoff_minute}) reached. No new {index_symbol} trades will be taken.")
+            break 
 
-        logging.info("Deploying fresh Iron Butterfly...")
+        logging.info(f"Deploying fresh Iron Butterfly for {index_symbol}...")
 
         spot = get_spot_price(index_symbol)
-        if not spot:
-            time.sleep(30)
-            continue
-            
-        chain = get_option_chain(index_symbol, expiry_date)
-        if not chain:
+        chain = get_option_chain(index_symbol, expiry_date) if spot else None
+        
+        if not spot or not chain:
             time.sleep(30)
             continue
 
-        #legs, entry_prices = calculate_iron_butterfly_legs(index_symbol, spot, chain)
         legs, entry_prices, strikes = calculate_iron_butterfly_legs(index_symbol, spot, chain)
-
         if not legs:
             time.sleep(30)
             continue
         
-        #execution_success = place_iron_butterfly_basket(legs, index_symbol, entry_prices)
         execution_success = place_iron_butterfly_basket(legs, index_symbol, entry_prices, strikes)
         
         if not execution_success:
-            logging.error("❌ Execution failed. Aborting risk monitor. Retrying in 30 seconds...")
             time.sleep(30)
             continue
             
         logging.info("Entering live risk monitoring phase...")
 
+        # The bot will safely stay locked in this monitor, even if it passes the cutoff time!
         stop_loss_hit, exit_prices = monitor_live_prices(legs, risk_management_evaluator)
         
         if stop_loss_hit:
-            logging.warning("Stop Loss hit! Squaring off and preparing to redeploy...")
+            logging.warning(f"Stop Loss hit for {index_symbol}! Squaring off...")
             square_off_all(exit_prices) 
             logging.info("Cooling down for 60 seconds...")
             time.sleep(60)
@@ -93,74 +86,104 @@ def continuous_trading_session(index_symbol, expiry_date, cutoff_hour, cutoff_mi
             logging.error("WebSocket connection terminated unexpectedly.")
             break 
 
-    # --- 3. END OF DAY: BTST CHECK ---
-    logging.info(f"--- END OF INTRADAY SESSION FOR {index_symbol} ---")
+    logging.info(f"--- END OF SESSION FOR {index_symbol} ---")
     
-    # Read the BTST toggle switch from the Dashboard
+    # --- 3. END OF DAY: BTST CHECK ---
     btst_file = os.path.join(BASE_DIR, "btst_flag.txt")
-    if os.path.exists(btst_file):
-        with open(btst_file, "r") as f:
-            flag = f.read().strip()
-        if flag == "TRUE":
-            logging.critical(f"🌙 BTST ENABLED: Carrying forward {index_symbol} position overnight. Skipping square-off.")
-            return # Let the trade sleep. It will wake up tomorrow morning.
+    if os.path.exists(btst_file) and open(btst_file, "r").read().strip() == "TRUE":
+        if state_manager.load_state():
+            logging.critical(f"🌙 BTST ENABLED: Carrying forward {index_symbol} overnight.")
+            return 
 
-    # If the switch is OFF, square off normally
-    logging.info(f"Initiating scheduled intraday square off for {index_symbol}...")
-    square_off_all()
+    # --- 4. SAFETY SQUARE OFF ---
+    if state_manager.load_state():
+        logging.info(f"Initiating final safety square off for {index_symbol}...")
+        
+        # Reach into the memory cache to get the final prices to pass to Upstox
+        exit_prices = None
+        live_file = os.path.join(BASE_DIR, "live_prices.json")
+        if os.path.exists(live_file):
+            with open(live_file, "r") as f:
+                latest_ticks = json.load(f)
+            
+            state = state_manager.load_state()
+            if state:
+                legs = state['legs']
+                try:
+                    exit_prices = {
+                        'sell_ce': latest_ticks[legs['sell_ce']]['ltp'],
+                        'sell_pe': latest_ticks[legs['sell_pe']]['ltp'],
+                        'buy_ce': latest_ticks[legs['buy_ce']]['ltp'],
+                        'buy_pe': latest_ticks[legs['buy_pe']]['ltp']
+                    }
+                except KeyError:
+                    pass # Failsafe if the cache is unexpectedly empty
+                    
+        square_off_all(exit_prices)
 
 
+def build_todays_schedule():
+    """
+    Reads the UI-selected dates and builds today's schedule dynamically.
+    Prioritizes the expiring index in the morning session.
+    """
+    schedule.clear('trading_jobs')
 
-# --- STATE RECOVERY (SELF-HEALING) ---
-def recover_orphaned_trade():
-    """Checks for abandoned trades on startup and resumes monitoring."""
-    state = state_manager.load_state()
-    if state and state.get("active"):
-        logging.critical("🔄 ORPHANED TRADE DETECTED ON BOOT! Initiating recovery sequence...")
-        
-        index_symbol = state.get("index_symbol")
-        legs = state.get("legs")
-        
-        logging.info(f"Resuming Risk Monitor for {index_symbol}...")
-        
-        # Jump directly back into the WebSocket loop using the saved legs
-        stop_loss_triggered, exit_prices = monitor_live_prices(legs, risk_management_evaluator)
-        
-        if stop_loss_triggered:
-            logging.info("Risk threshold met during recovery phase. Executing Square Off.")
-            square_off_all(exit_prices)
-        
-        logging.info("Recovery complete. Returning to normal schedule.")
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+
+    # --- 1. MARKET HOLIDAY CHECK ---
+    if hasattr(config, 'MARKET_HOLIDAYS') and today_str in config.MARKET_HOLIDAYS:
+        logging.critical(f"🌴 MARKET HOLIDAY DETECTED ({today_str}). The bot will sleep all day.")
+        return  # This instantly exits the function. No trades will be scheduled!
+
+
+    # --- READ UI EXPIRIES ---
+    expiry_file = os.path.join(BASE_DIR, "expiries.json")
+    nifty_expiry = "UNKNOWN"
+    sensex_expiry = "UNKNOWN"
+
+    if os.path.exists(expiry_file):
+        try:
+            with open(expiry_file, "r") as f:
+                data = json.load(f)
+                nifty_expiry = data.get("NIFTY", "UNKNOWN")
+                sensex_expiry = data.get("SENSEX", "UNKNOWN")
+        except Exception:
+            pass
+
+    # --- THE UI-ANCHORED ROUTER ---
+    if today_str == nifty_expiry:
+        logging.critical(f"🎯 NIFTY EXPIRY DETECTED ({today_str}). Loading Nifty Relay.")
+        # Morning: NIFTY (Expiring Index)
+        schedule.every().day.at("11:17").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=nifty_expiry, cutoff_hour=12, cutoff_minute=30).tag('trading_jobs')
+        # Afternoon: SENSEX (Safe Index) takes over after Nifty finishes
+        schedule.every().day.at("12:31").do(continuous_trading_session, index_symbol="SENSEX", expiry_date=sensex_expiry, cutoff_hour=15, cutoff_minute=15).tag('trading_jobs')
+
+    elif today_str == sensex_expiry:
+        logging.critical(f"🎯 SENSEX EXPIRY DETECTED ({today_str}). Loading Sensex Relay.")
+        # Morning: SENSEX (Expiring Index)
+        schedule.every().day.at("09:16").do(continuous_trading_session, index_symbol="SENSEX", expiry_date=sensex_expiry, cutoff_hour=12, cutoff_minute=30).tag('trading_jobs')
+        # Afternoon: NIFTY (Safe Index) takes over after Sensex finishes
+        schedule.every().day.at("12:31").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=nifty_expiry, cutoff_hour=15, cutoff_minute=15).tag('trading_jobs')
+
     else:
-        logging.info("No active trades found on boot. System is clean.")
+        logging.info(f"📅 Normal Trading Day ({today_str}). Defaulting to NIFTY.")
+        schedule.every().day.at("09:16").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=nifty_expiry, cutoff_hour=15, cutoff_minute=15).tag('trading_jobs')
 
-
-# --- STRICT INTRADAY SCHEDULER STATE MACHINE ---
-NEXT_NIFTY_EXPIRY = config.NIFTY_EXPIRY
-NEXT_SENSEX_EXPIRY = config.SENSEX_EXPIRY
-
-# Note: The final trade of the day is strictly cut off at 15:15 (3:15 PM) to avoid overnight carry
-schedule.every().monday.at("09:16").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=NEXT_NIFTY_EXPIRY, cutoff_hour=15, cutoff_minute=15)
-
-schedule.every().tuesday.at("09:16").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=NEXT_NIFTY_EXPIRY, cutoff_hour=12, cutoff_minute=0)
-schedule.every().tuesday.at("12:35").do(continuous_trading_session, index_symbol="SENSEX", expiry_date=NEXT_SENSEX_EXPIRY, cutoff_hour=15, cutoff_minute=15)
-
-schedule.every().wednesday.at("09:16").do(continuous_trading_session, index_symbol="SENSEX", expiry_date=NEXT_SENSEX_EXPIRY, cutoff_hour=15, cutoff_minute=15)
-
-schedule.every().thursday.at("10:30").do(continuous_trading_session, index_symbol="SENSEX", expiry_date=NEXT_SENSEX_EXPIRY, cutoff_hour=12, cutoff_minute=0)
-schedule.every().thursday.at("12:01").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=NEXT_NIFTY_EXPIRY, cutoff_hour=15, cutoff_minute=15)
-
-schedule.every().friday.at("09:16").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=NEXT_NIFTY_EXPIRY, cutoff_hour=15, cutoff_minute=15)
 
 if __name__ == "__main__":
     logging.info("System Architect Bot V3 Initialized...")
     if not getattr(config, 'LIVE_ACCESS_TOKEN', None) or not getattr(config, 'SANDBOX_ACCESS_TOKEN', None):
         logging.warning("One or both tokens are missing in config.py. API calls will fail.")
     
-    # 1. Check for and recover any interrupted trades first
-    recover_orphaned_trade()
+    # Build the schedule for TODAY immediately upon booting
+    build_todays_schedule()
     
-    # 2. Enter the infinite waiting loop
+    # Tell the bot to read the UI and re-run the schedule builder every morning at 8:00 AM
+    schedule.every().day.at("08:00").do(build_todays_schedule)
+    
+    # Enter the infinite waiting loop
     logging.info("Waiting for scheduled events...")
     while True:
         schedule.run_pending()

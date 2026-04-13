@@ -9,6 +9,28 @@ import sys
 import requests
 import urllib.parse
 import psutil  # <-- NEW IMPORT FOR PROCESS MANAGEMENT
+import datetime
+import os
+import json
+import streamlit as st
+
+# Anchor the path to the current directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+expiry_file = os.path.join(BASE_DIR, "expiries.json")
+
+# --- UI EXPIRY SETTINGS ---
+st.sidebar.header("🗓️ Expiry Settings")
+st.sidebar.caption("Update these dates to match the current week's expiries.")
+
+nifty_exp = st.sidebar.date_input("NIFTY Expiry Date", datetime.date.today())
+sensex_exp = st.sidebar.date_input("SENSEX Expiry Date", datetime.date.today())
+
+# Save the UI selections using the absolute path
+expiries = {"NIFTY": str(nifty_exp), "SENSEX": str(sensex_exp)}
+with open(expiry_file, "w") as f:
+    json.dump(expiries, f)
+
+
 
 st.set_page_config(page_title="Iron Butterfly V3", layout="wide")
 
@@ -233,12 +255,18 @@ with col_status:
                 
                 st.dataframe(df_live.style.applymap(color_pnl, subset=['PnL / Point']), hide_index=True, width='stretch')
                 
+
                 # Total Premium Tracker
                 entry_net = (entries['sell_ce'] + entries['sell_pe']) - (entries['buy_ce'] + entries['buy_pe'])
                 live_net = (live_sell_ce + live_sell_pe) - (live_buy_ce + live_buy_pe)
-                
+
+                net_diff = live_net - entry_net
+
+                # THE FIX: Ensure the minus sign comes BEFORE the Rupee symbol so Streamlit reads it correctly
+                delta_string = f"₹{net_diff:.2f}" if net_diff >= 0 else f"-₹{abs(net_diff):.2f}"
+
                 st.markdown("---")
-                st.metric("Net Premium (Credit)", f"₹{live_net:.2f}", delta=f"₹{live_net - entry_net:.2f}", delta_color="inverse")
+                st.metric("Net Premium (Credit)", f"₹{live_net:.2f}", delta=delta_string, delta_color="inverse")
 
         else:
             st.warning("🟡 SYSTEM IDLE: Waiting for schedule.")

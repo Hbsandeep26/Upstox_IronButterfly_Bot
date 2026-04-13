@@ -30,7 +30,14 @@ WING_PERCENT = 0.05
 MAX_DELTA_SKEW = 0.15
 
 
-
+# --- MARKET HOLIDAYS (YYYY-MM-DD) ---
+# The bot will completely ignore trading on these dates.
+MARKET_HOLIDAYS = [
+    "2026-04-14",  # Dr. Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-08-15",  # Independence Day
+    # Add any other official exchange holidays here...
+]
 
 TELEGRAM_BOT_TOKEN = "8335051930:AAFTA7WvOcIEvjgEDwA1YTenKwARNkibdKE" 
 TELEGRAM_CHAT_ID = "635369910"
