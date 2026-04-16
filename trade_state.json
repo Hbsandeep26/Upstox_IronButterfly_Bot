@@ -1,23 +1,23 @@
 {
     "active": true,
-    "index_symbol": "SENSEX",
+    "index_symbol": "NIFTY",
     "legs": {
-        "sell_ce": "BSE_FO|875387",
-        "sell_pe": "BSE_FO|869363",
-        "buy_ce": "BSE_FO|871298",
-        "buy_pe": "BSE_FO|873428"
+        "sell_ce": "NSE_FO|63424",
+        "sell_pe": "NSE_FO|63425",
+        "buy_ce": "NSE_FO|63478",
+        "buy_pe": "NSE_FO|63379"
     },
     "entry_prices": {
-        "sell_ce": 748.75,
-        "sell_pe": 725.6,
-        "buy_ce": 36.5,
-        "buy_pe": 37.2
+        "sell_ce": 196.1,
+        "sell_pe": 198.2,
+        "buy_ce": 10.2,
+        "buy_pe": 9.6
     },
-    "quantity": 20,
+    "quantity": 65,
     "strikes": {
-        "sell_ce": 76800,
-        "sell_pe": 76800,
-        "buy_ce": 79700.0,
-        "buy_pe": 73000.0
+        "sell_ce": 24150,
+        "sell_pe": 24150,
+        "buy_ce": 24950.0,
+        "buy_pe": 23050.0
     }
 }

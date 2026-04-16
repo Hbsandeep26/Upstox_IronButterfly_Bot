@@ -8,29 +8,8 @@ import subprocess
 import sys
 import requests
 import urllib.parse
-import psutil  # <-- NEW IMPORT FOR PROCESS MANAGEMENT
+import psutil
 import datetime
-import os
-import json
-import streamlit as st
-
-# Anchor the path to the current directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-expiry_file = os.path.join(BASE_DIR, "expiries.json")
-
-# --- UI EXPIRY SETTINGS ---
-st.sidebar.header("🗓️ Expiry Settings")
-st.sidebar.caption("Update these dates to match the current week's expiries.")
-
-nifty_exp = st.sidebar.date_input("NIFTY Expiry Date", datetime.date.today())
-sensex_exp = st.sidebar.date_input("SENSEX Expiry Date", datetime.date.today())
-
-# Save the UI selections using the absolute path
-expiries = {"NIFTY": str(nifty_exp), "SENSEX": str(sensex_exp)}
-with open(expiry_file, "w") as f:
-    json.dump(expiries, f)
-
-
 
 st.set_page_config(page_title="Iron Butterfly V3", layout="wide")
 
@@ -41,9 +20,31 @@ PID_FILE = os.path.join(BASE_DIR, "engine_pid.txt")
 STATE_FILE = os.path.join(BASE_DIR, "trade_state.json")
 LOG_FILE_PATH = os.path.join(BASE_DIR, "bot.log")
 CSV_LOG_FILE = os.path.join(BASE_DIR, "sandbox_trade_logs.csv")
+EXPIRY_FILE = os.path.join(BASE_DIR, "expiries.json")
+BTST_FILE = os.path.join(BASE_DIR, "btst_flag.txt")
+PANIC_FILE = os.path.join(BASE_DIR, "panic_flag.txt")
+LIVE_FILE = os.path.join(BASE_DIR, "live_prices.json")
 
-# --- 1. SETTINGS & AUTH MANAGER ---
-SETTINGS_FILE = "settings.json"
+# --- 1. LOAD SAVED STATES FIRST (Fixes #1, #6, #11) ---
+saved_nifty = datetime.date.today()
+saved_sensex = datetime.date.today()
+
+if os.path.exists(EXPIRY_FILE):
+    try:
+        with open(EXPIRY_FILE, "r") as f:
+            data = json.load(f)
+            saved_nifty = datetime.datetime.strptime(data.get("NIFTY", str(saved_nifty)), "%Y-%m-%d").date()
+            saved_sensex = datetime.datetime.strptime(data.get("SENSEX", str(saved_sensex)), "%Y-%m-%d").date()
+    except Exception:
+        pass
+
+btst_state = False
+if os.path.exists(BTST_FILE):
+    try:
+        with open(BTST_FILE, "r") as f:
+            btst_state = (f.read().strip() == "TRUE")
+    except Exception:
+        pass
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
@@ -57,14 +58,13 @@ def save_settings(new_settings):
 
 settings = load_settings()
 
+# --- SIDEBAR: AUTH & SETTINGS ---
 st.sidebar.header("⚙️ Bot Configuration")
 
-# --- AUTO-LOADED CREDENTIALS ---
 api_key = settings.get("API_KEY", "")
 api_secret = settings.get("API_SECRET", "")
 redirect_uri = settings.get("REDIRECT_URI", "https://127.0.0.1:5000/")
 
-# --- LIVE TOKEN GENERATOR ---
 st.sidebar.subheader("🟢 Live Authentication")
 if not api_key or not api_secret:
     st.sidebar.error("⚠️ API_KEY and API_SECRET missing in settings.json")
@@ -95,7 +95,6 @@ else:
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-# --- SANDBOX TOKEN MANAGER ---
 st.sidebar.subheader("🟡 Sandbox Authentication")
 new_sandbox_token = st.sidebar.text_input("30-Day Sandbox Token", value=settings.get("SANDBOX_ACCESS_TOKEN", ""), type="password")
 if st.sidebar.button("💾 Save Sandbox Token"):
@@ -103,31 +102,41 @@ if st.sidebar.button("💾 Save Sandbox Token"):
     save_settings(settings)
     st.sidebar.success("Sandbox Token Saved!")
 
-# --- TRADING PARAMETERS ---
+# --- SIDEBAR: UNIFIED TRADING PARAMETERS ---
 st.sidebar.subheader("📊 Trading Parameters")
+
+# Unified Expiry & BTST Inputs
+nifty_exp = st.sidebar.date_input("NIFTY Expiry Date", saved_nifty)
+sensex_exp = st.sidebar.date_input("SENSEX Expiry Date", saved_sensex)
+
+with open(EXPIRY_FILE, "w") as f:
+    json.dump({"NIFTY": str(nifty_exp), "SENSEX": str(sensex_exp)}, f)
+
+enable_btst = st.sidebar.toggle("🌙 Enable BTST (Carry Forward)", value=btst_state)
+with open(BTST_FILE, "w") as f:
+    f.write("TRUE" if enable_btst else "FALSE")
+
+# Other form settings
 with st.sidebar.form("config_form"):
     env_mode = st.selectbox("Environment", ["SANDBOX", "LIVE"], index=0 if settings.get("ENVIRONMENT") == "SANDBOX" else 1)
-    
-    nifty_exp = st.text_input("Next Nifty Expiry (YYYY-MM-DD)", value=settings.get("NIFTY_EXPIRY", ""))
-    sensex_exp = st.text_input("Next Sensex Expiry (YYYY-MM-DD)", value=settings.get("SENSEX_EXPIRY", ""))
-    
-    nifty_qty = st.number_input("Nifty Qty (Multiples of 75)", value=settings.get("NIFTY_LOT_SIZE", 75), step=75)
+    nifty_qty = st.number_input("Nifty Qty (Multiples of 65)", value=settings.get("NIFTY_LOT_SIZE", 65), step=65)
     sensex_qty = st.number_input("Sensex Qty (Multiples of 20)", value=settings.get("SENSEX_LOT_SIZE", 20), step=20)
+
+    # THE NEW UI ELEMENT
+    target_profit_pct = st.number_input("Target Profit (%)", value=settings.get("TARGET_PROFIT_PCT", 20), step=1)
     
-    if st.form_submit_button("💾 Save Parameters"):
+    if st.form_submit_button("💾 Save Settings"):
         settings["ENVIRONMENT"] = env_mode
-        settings["NIFTY_EXPIRY"] = nifty_exp
-        settings["SENSEX_EXPIRY"] = sensex_exp
         settings["NIFTY_LOT_SIZE"] = nifty_qty
         settings["SENSEX_LOT_SIZE"] = sensex_qty
+        settings["TARGET_PROFIT_PCT"] = target_profit_pct
         save_settings(settings)
-        st.sidebar.success("Parameters Saved!")
+        st.sidebar.success("Settings Saved!")
 
-# --- 2. ENGINE CONTROL (UPGRADED) ---
+# --- SIDEBAR: ENGINE CONTROL ---
 st.sidebar.markdown("---")
 st.sidebar.header("🚀 Engine Control")
 
-PID_FILE = "engine_pid.txt"
 col_start, col_stop = st.sidebar.columns(2)
 
 with col_start:
@@ -145,7 +154,6 @@ with col_start:
             if is_running:
                 st.warning("Engine is already running!")
             else:
-                # Launch silently and force ALL system errors into the log file
                 log_file = open(LOG_FILE_PATH, "a")
                 process = subprocess.Popen(
                     [sys.executable, "main.py"], 
@@ -155,10 +163,7 @@ with col_start:
                 )
                 with open(PID_FILE, "w") as f:
                     f.write(str(process.pid))
-                st.success("Engine Started! Check logs for startup status.")
-
-	   
-
+                st.success("Engine Started! Check logs.")
 
 with col_stop:
     if st.button("⏹️ Stop"):
@@ -168,7 +173,7 @@ with col_stop:
                     pid = int(f.read().strip())
                     if psutil.pid_exists(pid):
                         p = psutil.Process(pid)
-                        p.terminate()  # Gracefully shutdown the bot
+                        p.terminate() 
                         p.wait()
                         st.success("Engine Stopped!")
                     else:
@@ -181,104 +186,145 @@ with col_stop:
 
 st.sidebar.caption("You can now safely control the bot entirely from this UI.")
 
-# --- 3. MAIN DASHBOARD ---
+# --- MAIN DASHBOARD ---
 st.title("🦅 Iron Butterfly Command Center")
 
-# Carry Forward Toggle
-btst_mode = st.toggle("🌙 Enable BTST (Carry Forward overnight)", value=False, help="If OFF, bot will auto-square off at 3:15 PM.")
-if btst_mode:
-    with open("btst_flag.txt", "w") as f: f.write("TRUE")
-else:
-    if os.path.exists("btst_flag.txt"): os.remove("btst_flag.txt")
+# --- SYSTEM STATUS & PANIC CONTROLS (Fixes #7, #12) ---
+# --- SYSTEM STATUS & MANUAL EXIT CONTROLS ---
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    try:
+        output = subprocess.check_output(["pgrep", "-f", "main.py"]).decode().strip()
+        engine_running = len(output) > 0
+    except subprocess.CalledProcessError:
+        engine_running = False
+
+    if engine_running:
+        st.success("🟢 ENGINE STATUS: RUNNING")
+    else:
+        st.error("🔴 ENGINE STATUS: STOPPED")
+
+# Read the state early to determine if the button should be active
+is_trade_active = False
+if os.path.exists(STATE_FILE):
+    try:
+        with open(STATE_FILE, "r") as f:
+            is_trade_active = json.load(f).get("active", False)
+    except Exception:
+        pass
+
+# --- 🚨 TIME-BASED LOCKOUT LOGIC ---
+now = datetime.datetime.now()
+# Define standard NSE trading hours (09:15 AM to 15:30 PM)
+market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+# Check if current time is inside trading hours AND it is a weekday (Monday=0 to Friday=4)
+is_trading_hours = (market_open <= now <= market_close) and (now.weekday() < 5)
+
+with col2:
+    # The button is physically disabled if NO trade is active OR the market is CLOSED
+    button_locked = (not is_trade_active) or (not is_trading_hours)
+    
+    if st.button("🛑 MANUAL EXIT", type="primary", disabled=button_locked):
+        manual_file = os.path.join(BASE_DIR, "manual_exit_flag.txt")
+        with open(manual_file, "w") as f:
+            f.write("TRUE")
+        st.toast("Manual exit signal sent! Engine will square off immediately.")
+        
+    # Quality of Life: Add a tiny UI text so you know *why* the button is grayed out
+    if not is_trading_hours:
+        st.caption("🔒 Locked: Outside Market Hours")
+
+
+st.markdown("---")
 
 col_status, col_logs = st.columns([1, 1.5])
 
-
-
 with col_status:
     st.subheader("📡 Live System Status")
-    state_file = "trade_state.json"
-    live_file = "live_prices.json"
-
-    if os.path.exists(state_file):
-        with open(state_file, "r") as f:
+    
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
             state = json.load(f)
             
         if state.get("active"):
             st.success(f"🟢 ACTIVE TRADE: {state['index_symbol']} | Qty: {state.get('quantity', 'N/A')}")
             
-            if os.path.exists(live_file):
-                with open(live_file, "r") as lf:
-                    live_ticks = json.load(lf)
+            # --- SAFE JSON LOADING (Fixes Race Condition #8) ---
+            live_ticks = {}
+            if os.path.exists(LIVE_FILE):
+                try:
+                    with open(LIVE_FILE, "r") as lf:
+                        live_ticks = json.load(lf)
+                except json.JSONDecodeError:
+                    pass 
                 
-                legs = state['legs']
-                entries = state['entry_prices']
-                
-                # Safely get live prices (defaults to entry if cache is just booting up)
-                live_sell_pe = live_ticks.get(legs['sell_pe'], {}).get('ltp', entries['sell_pe'])
-                live_sell_ce = live_ticks.get(legs['sell_ce'], {}).get('ltp', entries['sell_ce'])
-                live_buy_pe = live_ticks.get(legs['buy_pe'], {}).get('ltp', entries['buy_pe'])
-                live_buy_ce = live_ticks.get(legs['buy_ce'], {}).get('ltp', entries['buy_ce'])
-                
-                strikes_data = state.get('strikes', {})
-                # --- NEW CLEAN TABLE FORMAT ---
-                st.markdown("### Live Position Tracker")
-                
-                
-                table_data = {
-                    "Leg Type": ["🔴 SELL PE", "🔴 SELL CE", "🟢 BUY PE", "🟢 BUY CE"],
-                    "Strike Price": [
-                        strikes_data.get('sell_pe', 'N/A'),
-                        strikes_data.get('sell_ce', 'N/A'),
-                        strikes_data.get('buy_pe', 'N/A'),
-                        strikes_data.get('buy_ce', 'N/A')
-                    ],
-                    "Trade Price": [f"₹{entries['sell_pe']:.2f}", f"₹{entries['sell_ce']:.2f}", f"₹{entries['buy_pe']:.2f}", f"₹{entries['buy_ce']:.2f}"],
-                    "Current Price": [f"₹{live_sell_pe:.2f}", f"₹{live_sell_ce:.2f}", f"₹{live_buy_pe:.2f}", f"₹{live_buy_ce:.2f}"],
-                    "PnL / Point": [
-                        (entries['sell_pe'] - live_sell_pe), 
-                        (entries['sell_ce'] - live_sell_ce), 
-                        (live_buy_pe - entries['buy_pe']),   
-                        (live_buy_ce - entries['buy_ce'])    
-                    ]
-                }
+            legs = state['legs']
+            entries = state['entry_prices']
+            
+            live_sell_pe = live_ticks.get(legs['sell_pe'], {}).get('ltp', entries['sell_pe'])
+            live_sell_ce = live_ticks.get(legs['sell_ce'], {}).get('ltp', entries['sell_ce'])
+            live_buy_pe = live_ticks.get(legs['buy_pe'], {}).get('ltp', entries['buy_pe'])
+            live_buy_ce = live_ticks.get(legs['buy_ce'], {}).get('ltp', entries['buy_ce'])
+            
+            strikes_data = state.get('strikes', {})
+            
+            st.markdown("### Live Position Tracker")
+            table_data = {
+                "Leg Type": ["🔴 SELL PE", "🔴 SELL CE", "🟢 BUY PE", "🟢 BUY CE"],
+                "Strike Price": [
+                    strikes_data.get('sell_pe', 'N/A'),
+                    strikes_data.get('sell_ce', 'N/A'),
+                    strikes_data.get('buy_pe', 'N/A'),
+                    strikes_data.get('buy_ce', 'N/A')
+                ],
+                "Trade Price": [f"₹{entries['sell_pe']:.2f}", f"₹{entries['sell_ce']:.2f}", f"₹{entries['buy_pe']:.2f}", f"₹{entries['buy_ce']:.2f}"],
+                "Current Price": [f"₹{live_sell_pe:.2f}", f"₹{live_sell_ce:.2f}", f"₹{live_buy_pe:.2f}", f"₹{live_buy_ce:.2f}"],
+                "PnL / Point": [
+                    (entries['sell_pe'] - live_sell_pe), 
+                    (entries['sell_ce'] - live_sell_ce), 
+                    (live_buy_pe - entries['buy_pe']),   
+                    (live_buy_ce - entries['buy_ce'])    
+                ]
+            }
 
-
-
-
-                df_live = pd.DataFrame(table_data)
-                
-                # Color the PnL column (Green for positive, Red for negative)
-                def color_pnl(val):
-                    color = '#00ff00' if val > 0 else '#ff0000' if val < 0 else 'white'
-                    return f'color: {color}'
-                
-                st.dataframe(df_live.style.applymap(color_pnl, subset=['PnL / Point']), hide_index=True, width='stretch')
-                
-
-                # Total Premium Tracker
-                entry_net = (entries['sell_ce'] + entries['sell_pe']) - (entries['buy_ce'] + entries['buy_pe'])
-                live_net = (live_sell_ce + live_sell_pe) - (live_buy_ce + live_buy_pe)
-
-                net_diff = live_net - entry_net
-
-                # THE FIX: Ensure the minus sign comes BEFORE the Rupee symbol so Streamlit reads it correctly
-                delta_string = f"₹{net_diff:.2f}" if net_diff >= 0 else f"-₹{abs(net_diff):.2f}"
-
-                st.markdown("---")
-                st.metric("Net Premium (Credit)", f"₹{live_net:.2f}", delta=delta_string, delta_color="inverse")
+            df_live = pd.DataFrame(table_data)
+            
+            def color_pnl(val):
+                color = '#00ff00' if val > 0 else '#ff0000' if val < 0 else 'white'
+                return f'color: {color}'
+            
+            st.dataframe(df_live.style.applymap(color_pnl, subset=['PnL / Point']), hide_index=True, width='stretch')
+            
+            # --- REAL PNL & BROKERAGE CALCULATOR (Fixes #3, #9, #10) ---
+            qty = state.get('quantity', settings.get("NIFTY_LOT_SIZE", 65) if state['index_symbol'] == 'NIFTY' else settings.get("SENSEX_LOT_SIZE", 20))
+            
+            entry_net = (entries['sell_ce'] + entries['sell_pe']) - (entries['buy_ce'] + entries['buy_pe'])
+            live_net = (live_sell_ce + live_sell_pe) - (live_buy_ce + live_buy_pe)
+            
+            # Math: (Entry Credit - Live Cost to Buy Back) * Quantity
+            gross_pnl = (entry_net - live_net) * qty
+            
+            # Deduct fixed brokerage for 4 legs (approx ₹170)
+            net_pnl = gross_pnl - 170.0 
+            
+            st.markdown("---")
+            if net_pnl >= 0:
+                st.metric("Net Profit/Loss (Post-Brokerage)", f"₹{net_pnl:.2f}", delta="In Profit", delta_color="normal")
+            else:
+                st.metric("Net Profit/Loss (Post-Brokerage)", f"-₹{abs(net_pnl):.2f}", delta="In Loss", delta_color="inverse")
 
         else:
             st.warning("🟡 SYSTEM IDLE: Waiting for schedule.")
     else:
         st.warning("🟡 SYSTEM IDLE: Waiting for schedule.")
 
-
 with col_logs:
     st.subheader("🖥️ Live Engine Logs")
-    log_file_path = LOG_FILE_PATH
-    if os.path.exists(log_file_path):
-        with open(log_file_path, "r") as file:
+    if os.path.exists(LOG_FILE_PATH):
+        with open(LOG_FILE_PATH, "r") as file:
             lines = file.readlines()
             last_lines = lines[-15:] if len(lines) > 15 else lines
             log_text = "".join(last_lines)
@@ -290,10 +336,9 @@ st.markdown("---")
 
 # --- 4. TRADE LEDGER & PNL ---
 st.subheader("📜 Trade Ledger & Performance")
-log_file = CSV_LOG_FILE
 
-if os.path.exists(log_file):
-    df = pd.read_csv(log_file)
+if os.path.exists(CSV_LOG_FILE):
+    df = pd.read_csv(CSV_LOG_FILE)
     def highlight_exits(row):
         return ['background-color: #2b2b2b' if row['Action'] == 'EXIT' else '' for _ in row]
     st.dataframe(df.style.apply(highlight_exits, axis=1), width='stretch')

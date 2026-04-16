@@ -27,8 +27,16 @@ logging.basicConfig(
     force=True 
 )
 
+
 def continuous_trading_session(index_symbol, expiry_date, cutoff_hour, cutoff_minute):
     logging.info(f"--- STARTING CONTINUOUS SESSION FOR {index_symbol} ---")
+
+    # Wipe any old manual exit clicks before starting a fresh session
+    manual_exit_file = os.path.join(BASE_DIR, "manual_exit_flag.txt")
+    if os.path.exists(manual_exit_file):
+        os.remove(manual_exit_file)
+        
+    # ... (Rest of your BTST wake-up protocol) ...
 
     # --- 1. BTST WAKE-UP PROTOCOL ---
     state = state_manager.load_state()
@@ -75,16 +83,42 @@ def continuous_trading_session(index_symbol, expiry_date, cutoff_hour, cutoff_mi
         logging.info("Entering live risk monitoring phase...")
 
         # The bot will safely stay locked in this monitor, even if it passes the cutoff time!
+
         stop_loss_hit, exit_prices = monitor_live_prices(legs, risk_management_evaluator)
-        
-        if stop_loss_hit:
-            logging.warning(f"Stop Loss hit for {index_symbol}! Squaring off...")
-            square_off_all(exit_prices) 
+
+        if stop_loss_hit == "MANUAL_EXIT":
+            logging.critical(f"🛑 Manual Exit executed. Squaring off {index_symbol}...")
+            square_off_all(exit_prices)
+            logging.info("Cooling down for 60 seconds before looking for new setups...")
+            time.sleep(60)
+
+        elif stop_loss_hit == "TAKE_PROFIT":
+            logging.critical(f"💰 PROFIT LOCKED for {index_symbol}! Squaring off positions.")
+            square_off_all(exit_prices)
+            logging.info("Cooling down for 60 seconds before looking for new setups...")
+            time.sleep(60)
+
+        elif stop_loss_hit == "STOP_LOSS":
+            logging.warning(f"🚨 Stop Loss hit for {index_symbol}! Squaring off...")
+            square_off_all(exit_prices)
             logging.info("Cooling down for 60 seconds...")
             time.sleep(60)
+
+        elif stop_loss_hit == "TIME_EXIT":
+            logging.critical(f"⏰ EOD Cutoff triggered for {index_symbol}. Squaring off and ending session.")
+            square_off_all(exit_prices)
+            break # Breaks the loop so it goes home for the day!
+
+        elif stop_loss_hit:
+            logging.warning(f"Stop Loss hit for {index_symbol}! Squaring off...")
+            square_off_all(exit_prices)
+            logging.info("Cooling down for 60 seconds...")
+            time.sleep(60)
+
         else:
             logging.error("WebSocket connection terminated unexpectedly.")
-            break 
+            break
+        
 
     logging.info(f"--- END OF SESSION FOR {index_symbol} ---")
     
@@ -156,7 +190,7 @@ def build_todays_schedule():
     if today_str == nifty_expiry:
         logging.critical(f"🎯 NIFTY EXPIRY DETECTED ({today_str}). Loading Nifty Relay.")
         # Morning: NIFTY (Expiring Index)
-        schedule.every().day.at("11:17").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=nifty_expiry, cutoff_hour=12, cutoff_minute=30).tag('trading_jobs')
+        schedule.every().day.at("09:16").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=nifty_expiry, cutoff_hour=12, cutoff_minute=30).tag('trading_jobs')
         # Afternoon: SENSEX (Safe Index) takes over after Nifty finishes
         schedule.every().day.at("12:31").do(continuous_trading_session, index_symbol="SENSEX", expiry_date=sensex_expiry, cutoff_hour=15, cutoff_minute=15).tag('trading_jobs')
 
@@ -167,23 +201,47 @@ def build_todays_schedule():
         # Afternoon: NIFTY (Safe Index) takes over after Sensex finishes
         schedule.every().day.at("12:31").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=nifty_expiry, cutoff_hour=15, cutoff_minute=15).tag('trading_jobs')
 
+    # ... (Keep your NIFTY and SENSEX UI Expiry if/elif blocks) ...
+    
     else:
-        logging.info(f"📅 Normal Trading Day ({today_str}). Defaulting to NIFTY.")
-        schedule.every().day.at("09:16").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=nifty_expiry, cutoff_hour=15, cutoff_minute=15).tag('trading_jobs')
+        weekday = now.strftime("%A").upper()
+        if weekday in ["WEDNESDAY", "THURSDAY"]:
+            logging.info(f"📅 Normal Trading Day ({today_str} - {weekday}). Defaulting to SENSEX.")
+            schedule.every().day.at("09:16").do(continuous_trading_session, index_symbol="SENSEX", expiry_date=sensex_expiry, cutoff_hour=15, cutoff_minute=15).tag('trading_jobs')
+        else:
+            logging.info(f"📅 Normal Trading Day ({today_str} - {weekday}). Defaulting to NIFTY.")
+            schedule.every().day.at("09:16").do(continuous_trading_session, index_symbol="NIFTY", expiry_date=nifty_expiry, cutoff_hour=15, cutoff_minute=15).tag('trading_jobs')
 
 
 if __name__ == "__main__":
     logging.info("System Architect Bot V3 Initialized...")
     if not getattr(config, 'LIVE_ACCESS_TOKEN', None) or not getattr(config, 'SANDBOX_ACCESS_TOKEN', None):
         logging.warning("One or both tokens are missing in config.py. API calls will fail.")
-    
-    # Build the schedule for TODAY immediately upon booting
+
+    # 1. Build the schedule for TODAY immediately upon booting
     build_todays_schedule()
-    
-    # Tell the bot to read the UI and re-run the schedule builder every morning at 8:00 AM
+
+    # 2. Tell the bot to read the UI and re-run the schedule builder every morning at 8:00 AM
     schedule.every().day.at("08:00").do(build_todays_schedule)
-    
-    # Enter the infinite waiting loop
+
+    # 3. --- 🚨 ORPHANED TRADE RECOVERY ---
+    import state_manager
+    recovered_state = state_manager.load_state()
+
+    if recovered_state and recovered_state.get("active"):
+        rec_index = recovered_state.get("index_symbol", "UNKNOWN")
+        logging.critical(f"🔄 ORPHANED TRADE DETECTED ON BOOT! Instantly recovering {rec_index} session...")
+
+        # Bypass the schedule and instantly jump into the live session
+        continuous_trading_session(
+            index_symbol=rec_index,
+            expiry_date="RECOVERY",
+            cutoff_hour=15,
+            cutoff_minute=15
+        )
+    # -------------------------------------------
+
+    # 4. Enter the infinite waiting loop
     logging.info("Waiting for scheduled events...")
     while True:
         schedule.run_pending()

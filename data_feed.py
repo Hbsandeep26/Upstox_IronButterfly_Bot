@@ -28,7 +28,7 @@ def get_spot_price(index_symbol):
     headers = {
         'accept': 'application/json',
         'Api-Version': '2.0',
-        'Authorization': f'Bearer {config.LIVE_ACCESS_TOKEN}'
+        'Authorization': f'Bearer {config.get_live_token()}'
     }
 
     try:
@@ -71,7 +71,7 @@ def get_option_chain(index_symbol, expiry_date):
     headers = {
         'accept': 'application/json',
         'Api-Version': '2.0',
-        'Authorization': f'Bearer {config.LIVE_ACCESS_TOKEN}'
+        'Authorization': f'Bearer {config.get_live_token()}'
     }
 
     try:
@@ -96,7 +96,7 @@ def monitor_live_prices(instrument_keys_dict, callback_function):
     keys_to_subscribe = list(instrument_keys_dict.values())
     
     configuration = upstox_client.Configuration()
-    configuration.access_token = config.LIVE_ACCESS_TOKEN
+    configuration.access_token = config.get_live_token()
     api_client = upstox_client.ApiClient(configuration)
     
     streamer = upstox_client.MarketDataStreamerV3(api_client, keys_to_subscribe, "full")
@@ -135,8 +135,9 @@ def monitor_live_prices(instrument_keys_dict, callback_function):
                 stop_loss_triggered, current_prices = callback_function(state["latest_prices"], instrument_keys_dict)
                 
                 if stop_loss_triggered:
-                    logging.critical("Risk limit reached! Terminating WebSocket connection.")
-                    state["stop_loss_hit"] = True
+                    logging.critical(f"Exit Signal Received: {stop_loss_triggered}. Terminating WebSocket.")
+                    # THE FIX: Save the exact signal (e.g., "TAKE_PROFIT") instead of hardcoding True!
+                    state["stop_loss_hit"] = stop_loss_triggered
                     state["exit_prices"] = current_prices
                     streamer.disconnect() 
                     

@@ -68,41 +68,88 @@ def calculate_iron_butterfly_legs(index_symbol, spot_price, option_chain_data):
 
 
 def risk_management_evaluator(live_data, legs):
-    """
-    Evaluates risk based strictly on the "Half Premium" logic for ALL days.
-    Exits if the Live Price of the Short CE is half (or less) of the Short PE, or vice versa.
-    """
+    import os
+    import logging
+    import config
+    import state_manager
+
     state = state_manager.load_state()
     if not state or 'entry_prices' not in state:
         return False, {}
 
-    if not all(key in live_data for key in legs.values()):
-        return False, {}
+    entries = state['entry_prices']
 
-    live_prices = {
-        'sell_ce': live_data[legs['sell_ce']]['ltp'],
-        'sell_pe': live_data[legs['sell_pe']]['ltp'],
-        'buy_ce': live_data[legs['buy_ce']]['ltp'],
-        'buy_pe': live_data[legs['buy_pe']]['ltp']
+    # --- 1. PARSE LIVE PRICES FIRST ---
+    # We build the clean dictionary immediately so we can return it safely for any exit signal.
+    live_sell_ce = live_data.get(legs['sell_ce'], {}).get('ltp', entries['sell_ce'])
+    live_sell_pe = live_data.get(legs['sell_pe'], {}).get('ltp', entries['sell_pe'])
+    live_buy_ce = live_data.get(legs['buy_ce'], {}).get('ltp', entries['buy_ce'])
+    live_buy_pe = live_data.get(legs['buy_pe'], {}).get('ltp', entries['buy_pe'])
+
+    current_prices = {
+        'sell_ce': live_sell_ce,
+        'sell_pe': live_sell_pe,
+        'buy_ce': live_buy_ce,
+        'buy_pe': live_buy_pe
     }
 
-    current_sell_ce = live_prices['sell_ce']
-    current_sell_pe = live_prices['sell_pe']
+    # --- 2. TACTICAL MANUAL EXIT CHECK ---
+    manual_exit_file = "manual_exit_flag.txt"
+    if os.path.exists(manual_exit_file):
+        with open(manual_exit_file, "r") as f:
+            if f.read().strip() == "TRUE":
+                logging.critical("🛑 MANUAL EXIT TRIGGERED FROM UI! Forcing Square Off.")
+                os.remove(manual_exit_file)
+                # FIX: Return the clean dictionary!
+                return "MANUAL_EXIT", current_prices 
 
-    if current_sell_ce > 0 and current_sell_pe > 0:
-        
-        # Condition 1: CE deflates, PE spikes (Market is crashing downward)
-        if current_sell_ce <= (current_sell_pe / 2):
-            logging.critical(f"🛑 EXIT TRIGGERED: Sell CE (₹{current_sell_ce:.2f}) is half or less of Sell PE (₹{current_sell_pe:.2f}).")
-            return True, live_prices
-        
-        # Condition 2: PE deflates, CE spikes (Market is rallying upward)
-        if current_sell_pe <= (current_sell_ce / 2):
-            logging.critical(f"🛑 EXIT TRIGGERED: Sell PE (₹{current_sell_pe:.2f}) is half or less of Sell CE (₹{current_sell_ce:.2f}).")
-            return True, live_prices
+    # --- 2.5 TIME-BASED EOD EXIT (BTST CHECK) ---
+    import datetime
+    now = datetime.datetime.now()
+    
+    # Check if it is exactly 3:15 PM (15:15) or later
+    if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+        btst_file = "btst_flag.txt"
+        btst_enabled = False
+        if os.path.exists(btst_file):
+            with open(btst_file, "r") as f:
+                btst_enabled = (f.read().strip() == "TRUE")
+                
+        if not btst_enabled:
+            logging.critical("⏰ 3:15 PM CUTOFF REACHED! BTST is disabled. Forcing End of Day Square Off.")
+            return "TIME_EXIT", current_prices
 
-    # Normal heartbeat log every ~10 seconds
-    if int(time.time()) % 10 == 0:
-        logging.info(f"Live Balance -> Sell CE: ₹{current_sell_ce:.2f} | Sell PE: ₹{current_sell_pe:.2f}")
 
-    return False, live_prices
+    # --- 3. TAKE PROFIT CHECK (The Ceiling) ---
+    entry_net = (entries['sell_ce'] + entries['sell_pe']) - (entries['buy_ce'] + entries['buy_pe'])
+    
+    # Get the dynamic target from the UI (defaults to 20%)
+    target_pct = config.get_target_profit_pct() / 100.0
+    target_exit_premium = entry_net * (1.0 - target_pct)
+    
+    live_net = (live_sell_ce + live_sell_pe) - (live_buy_ce + live_buy_pe)
+    
+    if live_net <= target_exit_premium:
+        logging.critical(f"🎯 TARGET REACHED! Net premium decayed to ₹{live_net:.2f} (Target: ₹{target_exit_premium:.2f}).")
+        # FIX: Return the clean dictionary!
+        return "TAKE_PROFIT", current_prices
+
+    # --- 4. HALF-PREMIUM STOP LOSS CHECK (The Floor) ---
+    # Force strict floats to completely prevent "String Math" bugs
+    entry_sell_ce = float(entries['sell_ce'])
+    entry_sell_pe = float(entries['sell_pe'])
+
+    limit_ce = entry_sell_ce * 2.0
+    limit_pe = entry_sell_pe * 2.0
+
+    if float(live_sell_ce) >= limit_ce:
+        logging.warning(f"🚨 STOP LOSS: Call leg doubled! (Entry: ₹{entry_sell_ce:.2f}, Limit: ₹{limit_ce:.2f}, Live: ₹{float(live_sell_ce):.2f})")
+        return "STOP_LOSS", current_prices
+
+    if float(live_sell_pe) >= limit_pe:
+        logging.warning(f"🚨 STOP LOSS: Put leg doubled! (Entry: ₹{entry_sell_pe:.2f}, Limit: ₹{limit_pe:.2f}, Live: ₹{float(live_sell_pe):.2f})")
+        return "STOP_LOSS", current_prices
+
+    # If no exits are triggered, keep holding
+    return False, {}
+    

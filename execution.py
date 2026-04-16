@@ -34,7 +34,7 @@ def place_iron_butterfly_basket(legs, index_symbol, entry_prices, strikes):
         logging.critical("🔴 LIVE MODE DETECTED: Routing orders to real Upstox Exchange...")
         
         configuration = upstox_client.Configuration()
-        configuration.access_token = config.LIVE_ACCESS_TOKEN
+        configuration.access_token = config.get_live_token()
         
         api_client = upstox_client.ApiClient(configuration)
         api_instance = upstox_client.OrderApiV3(api_client)
@@ -123,7 +123,7 @@ def square_off_all(exit_prices=None):
             logging.critical("🔴 ROUTING EXIT ORDERS TO LIVE UPSTOX EXCHANGE...")
 
             configuration = upstox_client.Configuration()
-            configuration.access_token = config.LIVE_ACCESS_TOKEN
+            configuration.access_token = config.get_live_token()
 
             api_client = upstox_client.ApiClient(configuration)
             api_instance = upstox_client.OrderApiV3(api_client)
