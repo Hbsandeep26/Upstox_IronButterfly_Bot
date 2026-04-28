@@ -37,7 +37,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV=/home/ec2-user/trading-bot/venv
+VIRTUAL_ENV=/home/ec2-user/trading-bot-trailing/venv
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"

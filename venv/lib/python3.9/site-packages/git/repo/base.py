@@ -1042,11 +1042,19 @@ class Repo:
         :raise TypeError:
             If HEAD is detached.
 
+        :raise ValueError:
+            If HEAD points to the ``.invalid`` ref Git uses to mark refs as
+            incompatible with older clients.
+
         :return:
             :class:`~git.refs.head.Head` to the active branch
         """
-        # reveal_type(self.head.reference)  # => Reference
-        return self.head.reference
+        active_branch = self.head.reference
+        if active_branch.name == ".invalid":
+            raise ValueError(
+                "HEAD points to 'refs/heads/.invalid', which Git uses to mark refs as incompatible with older clients"
+            )
+        return active_branch
 
     def blame_incremental(self, rev: str | HEAD | None, file: str, **kwargs: Any) -> Iterator["BlameEntry"]:
         """Iterator for blame information for the given file at the given revision.
@@ -1378,8 +1386,8 @@ class Repo:
             Git.check_unsafe_protocols(url)
         if not allow_unsafe_options:
             Git.check_unsafe_options(options=list(kwargs.keys()), unsafe_options=cls.unsafe_git_clone_options)
-        if not allow_unsafe_options and multi_options:
-            Git.check_unsafe_options(options=multi_options, unsafe_options=cls.unsafe_git_clone_options)
+        if not allow_unsafe_options and multi:
+            Git.check_unsafe_options(options=multi, unsafe_options=cls.unsafe_git_clone_options)
 
         proc = git.clone(
             multi,

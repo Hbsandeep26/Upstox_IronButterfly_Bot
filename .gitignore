@@ -1,1 +1,13 @@
-config.py
+__pycache__
+tests
+venv
+bot.log
+btst_flag.txt
+engine_heartbeat.json
+engine_pid.txt
+expiries.json
+live_prices.json
+sandbox_trade_logs.csv
+settings.json
+
+
